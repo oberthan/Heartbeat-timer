@@ -14,6 +14,8 @@ const DEFS = [
   ['dbC',    'Volume curve (>1 = swells late)', 1.5, 0.2, 4, 0.05],
   ['trim',   'Output trim (dB)',                  0, -24, 24, 0.5],
   ['Sound', null],
+  ['useSample','Use uploaded sound (0 = synth, 1 = uploaded)', 0, 0, 1, 1],
+  ['sampleGain','Uploaded sound level (dB)',     0, -24, 24, 0.5],
   ['pitch',  'Thump pitch (Hz)',                 48, 25, 120, 1],
   ['drop',   'Pitch drop (Hz)',                 110, 0, 400, 1],
   ['decay',  'Lub decay (s)',                  0.12, 0.03, 0.5, 0.01],

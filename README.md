@@ -24,6 +24,12 @@ before the game. Settings saved on the server are lost on a restart (free disk i
 2. Run `Export_Heartbeat_Settings.lua` (Actions -> Show action list -> New action -> Load ReaScript).
 3. Paste the JSON into "Import settings" on the controller and press the button.
 
+## Use your own heartbeat sound
+On the controller, choose an audio file (wav/mp3/ogg/m4a, up to 12 MB) and press "Upload sound". Use a single heartbeat
+(one lub-dub) - it is played once per beat, following the BPM and volume curve, with the reverb applied.
+"Use uploaded sound" (set to 1) switches between your file and the synthesized sound. The file is kept on the server
+(lost on a restart on Render's free plan, so upload it again if needed).
+
 ## Run locally
 ```
 npm install
