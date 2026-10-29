@@ -19,8 +19,10 @@ Free plan note: the service sleeps after ~15 min idle and takes up to a minute t
 before the game. Settings saved on the server are lost on a restart (free disk is not persistent); re-import them.
 
 ## Hints and locking
-- The controller has a **Hint** box. Sending a hint shows it at the bottom of every display; a new hint replaces the one
-  on screen, and "Remove hint" clears it. Hints work any time, also while the countdown is running.
+- The controller has a **Hint** box. Sending a hint makes the countdown glide up and shrink, then fades the hint in below it
+  in large text (it picks the biggest size that fits, up to 300 characters). A new hint fades the old one out and the new
+  one in; "Remove hint" fades it out and the countdown eases back to the middle. Hints work any time, also while the
+  countdown is running.
 - While the countdown is running (from pressing Start until you press Stop) the settings, import, sound upload and
   sound removal are hidden on the controller, and the server refuses those changes too. Press Stop to edit again.
   Start is also refused while running, so the timer can't be restarted by accident.
