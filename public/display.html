@@ -68,6 +68,14 @@ function onState(m) {
   syncSample();
 }
 
+// ---------- sound/picture sync ----------
+// The picture has no output delay but sound does (audio buffering, Bluetooth...). Playing the sound this many
+// seconds early makes it arrive together with the pulse. The slider adds to what the browser reports.
+const soundAdvance = () => {
+  const dev = ctx ? (ctx.outputLatency || 0) + (ctx.baseLatency || 0) : 0;
+  return dev + P.syncMs / 1000;
+};
+
 // ---------- uploaded track ----------
 // The uploaded file is the whole timeline (its start offset is baked in), so it plays from the moment
 // the run starts. It is streamed, not decoded into memory, and kept in sync with the server clock.
@@ -90,7 +98,7 @@ function ensureSampleEl() {
   ctx.createMediaElementSource(sampleEl).connect(sampleGain);
   sampleGain.connect(master); // no extra reverb: the track already has it
 }
-const sampleTarget = () => (serverNow() - run.startServerMs) / 1000 + P.startAt * 60; // seconds into the track
+const sampleTarget = () => (serverNow() - run.startServerMs) / 1000 + P.startAt * 60 + soundAdvance(); // seconds into the track
 function syncSample() {
   clearTimeout(startTimer);
   ensureSampleEl();
@@ -107,10 +115,14 @@ function syncSample() {
   const t = sampleTarget();
   if (t < 0) { startTimer = setTimeout(syncSample, Math.min(-t * 1000, 500)); return; } // waiting for the start
   if (sampleEl.duration && t >= sampleEl.duration) return; // track is over
-  if (sampleEl.paused) { sampleEl.currentTime = t; sampleEl.play().catch(() => {}); return; }
-  if (!sampleEl.seeking && Math.abs(sampleEl.currentTime - t) > 0.08) sampleEl.currentTime = t; // drift / late start
+  if (sampleEl.paused) { sampleEl.playbackRate = 1; sampleEl.currentTime = t; sampleEl.play().catch(() => {}); return; }
+  // keep it locked to the clock: seek if far off, otherwise nudge the speed a little (not audible)
+  if (sampleEl.seeking) return;
+  const drift = sampleEl.currentTime - t;
+  if (Math.abs(drift) > 0.25) sampleEl.currentTime = t;
+  else sampleEl.playbackRate = Math.abs(drift) < 0.012 ? 1 : clamp(1 - drift * 1.5, 0.97, 1.03);
 }
-setInterval(syncSample, 250);
+setInterval(syncSample, 100);
 
 // ---------- audio ----------
 let ctx = null, master, convolver, wetGain;
@@ -168,7 +180,7 @@ function schedule(pos) {
     if (P.endMode === 1 && bt >= D()) break;
     const amp = Math.pow(10, dbAt(P, bt) / 20);
     const period = 60 / bpmAt(P, bt), gap = Math.min(P.gap / 1000, period * 0.4);
-    const when = ctx.currentTime + (bt - pos);
+    const when = ctx.currentTime + (bt - pos) - soundAdvance();
     // with an uploaded track the beats are only used for the visual pulse; the sound comes from the track
     if (P.useSample < 0.5 && when >= ctx.currentTime - 0.02) {
       const w = Math.max(when, ctx.currentTime);

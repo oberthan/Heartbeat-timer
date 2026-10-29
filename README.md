@@ -36,6 +36,9 @@ On the controller, choose the whole heartbeat track (wav/mp3/ogg/m4a, any length
   that joins or reloads mid-run jumps to the right position. Any start offset must already be in the audio.
 - "Use uploaded track" (set to 1) switches between your file and the synthesized sound; the level slider adjusts it.
 - The BPM, volume and offset settings then only drive the pulse of the numbers, so set them to match the track.
+- Sound arrives later than the picture because of the device's audio output delay (worse over Bluetooth). The display
+  plays the sound earlier by the delay the browser reports, and the "Sound earlier than picture (ms)" slider adds to that.
+  If the sound still feels late, raise it in steps of 20-50 ms; if it feels early, lower it (it can go negative).
 - The file is stored on the server's disk and streamed to the displays (it is not loaded into memory), so long
   tracks are fine. On Render's free plan the disk is wiped on a restart, so upload it again if that happens.
 
