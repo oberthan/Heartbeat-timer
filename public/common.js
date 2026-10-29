@@ -16,7 +16,7 @@ const DEFS = [
   ['Sound', null],
   ['useSample','Use uploaded track (0 = synth, 1 = uploaded)', 0, 0, 1, 1],
   ['sampleGain','Uploaded track level (dB)',     0, -24, 24, 0.5],
-  ['syncMs', 'Sound earlier than picture (ms, +20 if the sound is late)', 0, -300, 600, 5],
+  ['syncMs', 'Sound earlier than picture (ms, +20 if the sound is late)', 0, -300, 1600, 5],
   ['pitch',  'Thump pitch (Hz)',                 48, 25, 120, 1],
   ['drop',   'Pitch drop (Hz)',                 110, 0, 400, 1],
   ['decay',  'Lub decay (s)',                  0.12, 0.03, 0.5, 0.01],
