@@ -22,6 +22,14 @@
 let P = defaultSettings();
 let run = { running: false, startServerMs: 0 };
 let ws, armed = false, wsOpen = false;
+// ?preview=1: used for the little window on the controller. Same picture, but no sound, no arming, no fullscreen,
+// and it does not register as a display (so it isn't counted on the controller).
+const PREVIEW = new URLSearchParams(location.search).has('preview');
+if (PREVIEW) {
+  document.getElementById('arm').style.display = 'none';
+  document.getElementById('conn').style.display = 'none';
+  document.documentElement.style.cursor = 'default';
+}
 
 // ---------- clock sync with the server ----------
 let clockOffset = 0, samples = [];
@@ -40,8 +48,10 @@ function connect() {
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
   ws.onopen = () => {
     wsOpen = true; samples = [];
-    ws.send(JSON.stringify({ type: 'hello', role: 'display' }));
-    ws.send(JSON.stringify({ type: 'armed', armed }));
+    if (!PREVIEW) {
+      ws.send(JSON.stringify({ type: 'hello', role: 'display' }));
+      ws.send(JSON.stringify({ type: 'armed', armed }));
+    }
     for (let i = 0; i < 8; i++) setTimeout(sendSync, i * 150);
   };
   ws.onmessage = e => {
@@ -69,7 +79,7 @@ function onState(m) {
   const key = m.run.running ? m.run.startServerMs : null;
   run = m.run;
   if (key !== lastRunKey) { lastRunKey = key; key ? beginRun() : endRun(); }
-  else if (key && armed) resyncBeats();
+  else if (key && (armed || PREVIEW)) resyncBeats();
   syncSample();
 }
 
@@ -197,16 +207,16 @@ function endRun() { /* no new beats; tails ring out */ }
 function resyncBeats() { nextBeat = Math.max(0, Math.ceil(beatsAt(P, Math.max(posNow(), 0)) - 1e-9)); }
 
 function schedule(pos) {
-  if (!ctx || !armed) return;
+  if (!PREVIEW && (!ctx || !armed)) return;
   while (true) {
     const bt = beatTime(P, nextBeat);
     if (bt > pos + 1.5) break;   // look-ahead, so a throttled tab doesn't drop beats
     if (P.endMode === 1 && bt >= D()) break;
     const amp = Math.pow(10, dbAt(P, bt) / 20);
     const period = 60 / bpmAt(P, bt), gap = Math.min(P.gap / 1000, period * 0.4);
-    const when = ctx.currentTime + (bt - pos) - soundAdvance();
+    const when = ctx ? ctx.currentTime + (bt - pos) - soundAdvance() : 0;
     // with an uploaded track the beats are only used for the visual pulse; the sound comes from the track
-    if (P.useSample < 0.5 && when >= ctx.currentTime - 0.02) {
+    if (!PREVIEW && P.useSample < 0.5 && when >= ctx.currentTime - 0.02) {
       const w = Math.max(when, ctx.currentTime);
       thump(w, P.pitch, amp * 0.8, P.decay);
       thump(w + gap, P.pitch * 1.2, amp * 0.8 * P.dub, P.decay * 0.8);
@@ -217,7 +227,7 @@ function schedule(pos) {
   while (hits.length > 40) hits.shift();
 }
 // scheduling runs on a timer, not the animation frame, so it keeps going if the tab is throttled
-setInterval(() => { if (run.running && armed) schedule(posNow()); }, 100);
+setInterval(() => { if (run.running && (armed || PREVIEW)) schedule(posNow()); }, 100);
 
 // ---------- drawing ----------
 let hint = null, hintSince = 0;
@@ -297,7 +307,7 @@ function frame() {
     pos = posNow();
     left = Math.max(D() - Math.max(pos, 0), 0);
     if (pos < 0) left = D();
-    if (armed) lv = pulseLevel(pos);
+    if (armed || PREVIEW) lv = pulseLevel(pos);
   }
   if (ctx) wetGain.gain.value = P.rev;
   g2.fillStyle = '#000'; g2.fillRect(0, 0, W, H);
@@ -328,7 +338,7 @@ async function arm() {
   try { await navigator.wakeLock.request('screen'); } catch {}
 }
 document.getElementById('arm').onclick = arm;
-document.addEventListener('dblclick', () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen());
+document.addEventListener('dblclick', () => PREVIEW ? null : document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen());
 document.addEventListener('visibilitychange', async () => { try { if (!document.hidden && armed) await navigator.wakeLock.request('screen'); } catch {} });
 connect();
 </script>

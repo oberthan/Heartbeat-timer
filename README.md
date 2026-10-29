@@ -4,6 +4,8 @@ Realtime heartbeat sound + countdown video, generated in the browser. A controll
 
 - `/display.html` - the room screen. Tap once to arm (browsers need a tap before they allow sound), it goes fullscreen.
 - `/controller.html` - phone/laptop. Settings, Start in N seconds, Stop.
+  A small live preview of the display is pinned in the bottom-right corner (silent, and not counted as a display).
+  Tap it to enlarge or shrink it; the choice is remembered. It works on phone and computer.
 
 All devices sync to the server clock, so the display starts exactly at the chosen moment, and a display that
 joins (or reloads) mid-run jumps to the right point.
