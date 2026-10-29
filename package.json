@@ -1,0 +1,10 @@
+{
+  "name": "heartbeat-countdown",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Escape room heartbeat countdown: realtime audio+video in the browser, started remotely.",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" },
+  "dependencies": { "ws": "^8.18.0" }
+}

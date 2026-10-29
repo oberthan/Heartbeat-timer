@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Heartbeat Display</title>
+<style>
+  html, body { margin:0; height:100%; background:#000; overflow:hidden; cursor:none; }
+  canvas { position:fixed; inset:0; width:100%; height:100%; display:block; background:#000; }
+  #arm { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
+         background:#000; color:#777; font:20px system-ui,sans-serif; cursor:pointer; text-align:center; gap:10px; }
+  #arm b { color:#aaa; font-size:28px; }
+  #conn { position:fixed; right:8px; bottom:6px; color:#222; font:11px system-ui; }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<div id="arm"><b>Tap to arm this display</b><span>Needed once so the browser allows sound. It goes fullscreen.</span><span id="armStatus"></span></div>
+<div id="conn"></div>
+<script src="common.js"></script>
+<script>
+let P = defaultSettings();
+let run = { running: false, startServerMs: 0 };
+let ws, armed = false, wsOpen = false;
+
+// ---------- clock sync with the server ----------
+let clockOffset = 0, samples = [];
+const serverNow = () => performance.now() + clockOffset;
+function sendSync() { if (wsOpen) ws.send(JSON.stringify({ type: 'sync', t0: performance.now() })); }
+function onSync(m) {
+  const t1 = performance.now(), rtt = t1 - m.t0;
+  samples.push({ rtt, off: m.server + rtt / 2 - t1 });
+  if (samples.length > 12) samples.shift();
+  clockOffset = samples.reduce((a, b) => (b.rtt < a.rtt ? b : a)).off; // lowest-latency sample wins
+  document.getElementById('conn').textContent = 'sync ±' + Math.round(Math.min(...samples.map(s => s.rtt)) / 2) + 'ms';
+}
+
+// ---------- websocket ----------
+function connect() {
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  ws.onopen = () => {
+    wsOpen = true; samples = [];
+    ws.send(JSON.stringify({ type: 'hello', role: 'display' }));
+    ws.send(JSON.stringify({ type: 'armed', armed }));
+    for (let i = 0; i < 8; i++) setTimeout(sendSync, i * 150);
+  };
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.type === 'sync') onSync(m);
+    else if (m.type === 'state') onState(m);
+  };
+  ws.onclose = () => { wsOpen = false; setTimeout(connect, 1500); };
+}
+setInterval(sendSync, 20000);
+
+let lastRunKey = null;
+function onState(m) {
+  const oldRev = P.revLen + '/' + P.revDamp;
+  P = cleanSettings(m.settings);
+  if (ctx && oldRev !== P.revLen + '/' + P.revDamp) buildReverb();
+  const key = m.run.running ? m.run.startServerMs : null;
+  run = m.run;
+  if (key !== lastRunKey) { lastRunKey = key; key ? beginRun() : endRun(); }
+  else if (key && armed) resyncBeats();
+}
+
+// ---------- audio ----------
+let ctx = null, master, convolver, wetGain;
+function buildReverb() {
+  const len = Math.floor(ctx.sampleRate * P.revLen);
+  const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+  for (let c = 0; c < 2; c++) {
+    const a = buf.getChannelData(c); let lp = 0;
+    for (let i = 0; i < len; i++) {
+      lp = (Math.random() * 2 - 1) * (1 - P.revDamp) + lp * P.revDamp;
+      a[i] = lp * Math.exp(-6.9078 * i / ctx.sampleRate / P.revLen);
+    }
+  }
+  convolver.buffer = buf;
+}
+function initAudio() {
+  if (ctx) return;
+  ctx = new AudioContext();
+  master = ctx.createGain(); master.connect(ctx.destination);
+  convolver = ctx.createConvolver(); wetGain = ctx.createGain();
+  convolver.connect(wetGain); wetGain.connect(ctx.destination);
+  buildReverb();
+}
+function thump(when, f0, amp, decay) {
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0, when);
+  g.gain.linearRampToValueAtTime(amp, when + 0.004);
+  g.gain.setTargetAtTime(0, when + 0.004, decay);
+  for (const [mul, lvl] of [[1, 1], [2, P.body]]) {
+    if (lvl <= 0) continue;
+    const o = ctx.createOscillator(), og = ctx.createGain();
+    o.frequency.setValueAtTime((f0 + P.drop) * mul, when);
+    o.frequency.setTargetAtTime(f0 * mul, when, 0.03);
+    og.gain.value = lvl; o.connect(og); og.connect(g);
+    o.start(when); o.stop(when + decay * 8 + 0.1);
+  }
+  g.connect(master); g.connect(convolver);
+}
+
+// ---------- timeline ----------
+// position on the timeline in seconds (negative = before the countdown starts)
+const posNow = () => (serverNow() - run.startServerMs) / 1000 - P.offs + P.startAt * 60;
+let nextBeat = 0, hits = [];
+const D = () => P.dur * 60;
+
+function beginRun() { hits = []; nextBeat = Math.max(0, Math.ceil(beatsAt(P, Math.max(posNow(), 0)) - 1e-9)); }
+function endRun() { /* no new beats; tails ring out */ }
+function resyncBeats() { nextBeat = Math.max(0, Math.ceil(beatsAt(P, Math.max(posNow(), 0)) - 1e-9)); }
+
+function schedule(pos) {
+  if (!ctx || !armed) return;
+  while (true) {
+    const bt = beatTime(P, nextBeat);
+    if (bt > pos + 1.5) break;   // look-ahead, so a throttled tab doesn't drop beats
+    if (P.endMode === 1 && bt >= D()) break;
+    const amp = Math.pow(10, dbAt(P, bt) / 20);
+    const period = 60 / bpmAt(P, bt), gap = Math.min(P.gap / 1000, period * 0.4);
+    const when = ctx.currentTime + (bt - pos);
+    if (when >= ctx.currentTime - 0.02) {
+      const w = Math.max(when, ctx.currentTime);
+      thump(w, P.pitch, amp * 0.8, P.decay);
+      thump(w + gap, P.pitch * 1.2, amp * 0.8 * P.dub, P.decay * 0.8);
+    }
+    hits.push({ t: bt, gap, amp });
+    nextBeat++;
+  }
+  while (hits.length > 40) hits.shift();
+}
+// scheduling runs on a timer, not the animation frame, so it keeps going if the tab is throttled
+setInterval(() => { if (run.running && armed) schedule(posNow()); }, 100);
+
+// ---------- drawing ----------
+const cv = document.getElementById('cv'), g2 = cv.getContext('2d');
+function fit() { const d = devicePixelRatio || 1; cv.width = innerWidth * d; cv.height = innerHeight * d; }
+addEventListener('resize', fit); fit();
+
+function pulseLevel(pos) {
+  let v = 0;
+  for (const h of hits) {
+    const k = Math.min(1, h.amp * 1.5 + 0.15);
+    const a = pos - h.t; if (a >= 0) v += Math.exp(-a / (P.decay * 1.3)) * k;
+    const b = pos - h.t - h.gap; if (b >= 0) v += Math.exp(-b / P.decay) * P.dub * k * 0.7;
+  }
+  return clamp(v, 0, 1.2);
+}
+function frame() {
+  const W = cv.width, H = cv.height;
+  let pos = 0, left = D() - P.startAt * 60, lv = 0;
+  if (run.running) {
+    pos = posNow();
+    left = Math.max(D() - Math.max(pos, 0), 0);
+    if (pos < 0) left = D();
+    if (armed) lv = pulseLevel(pos);
+  }
+  if (ctx) wetGain.gain.value = P.rev;
+  g2.fillStyle = '#000'; g2.fillRect(0, 0, W, H);
+  const grey = Math.round(P.minGrey + (P.maxGrey - P.minGrey) * clamp(lv * P.pulse, 0, 1));
+  g2.fillStyle = `rgb(${grey},${grey},${grey})`;
+  g2.textAlign = 'center'; g2.textBaseline = 'middle';
+  g2.save(); g2.translate(W / 2, H / 2);
+  const sc = 1 + 0.035 * lv * P.pulse; g2.scale(sc, sc);
+  g2.font = `700 ${Math.round(H * P.tsize)}px Arial, sans-serif`;
+  g2.fillText(fmtTime(left), 0, 0);
+  g2.restore();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ---------- arming ----------
+async function arm() {
+  initAudio(); await ctx.resume();
+  armed = true;
+  document.getElementById('arm').style.display = 'none';
+  if (wsOpen) ws.send(JSON.stringify({ type: 'armed', armed: true }));
+  if (run.running) resyncBeats();
+  try { await document.documentElement.requestFullscreen(); } catch {}
+  try { await navigator.wakeLock.request('screen'); } catch {}
+}
+document.getElementById('arm').onclick = arm;
+document.addEventListener('dblclick', () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen());
+document.addEventListener('visibilitychange', async () => { try { if (!document.hidden && armed) await navigator.wakeLock.request('screen'); } catch {} });
+connect();
+</script>
+</body>
+</html>

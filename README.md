@@ -1,0 +1,32 @@
+# Heartbeat countdown (Render)
+
+Realtime heartbeat sound + countdown video, generated in the browser. A controller device starts it remotely.
+
+- `/display.html` - the room screen. Tap once to arm (browsers need a tap before they allow sound), it goes fullscreen.
+- `/controller.html` - phone/laptop. Settings, password, Start in N seconds, Stop.
+
+All devices sync to the server clock, so the display starts exactly at the chosen moment, and a display that
+joins (or reloads) mid-run jumps to the right point.
+
+## Deploy on Render
+1. Put this folder in a GitHub repo (do not commit `node_modules`).
+2. Render dashboard -> New -> Blueprint (uses `render.yaml`) or New -> Web Service:
+   build `npm install`, start `npm start`.
+3. Set the environment variable `CONTROL_PASSWORD` to something only you know.
+   Without it anyone with the link can start/stop the countdown.
+4. Open `https://<your-service>.onrender.com/controller.html`, type the password.
+
+Free plan note: the service sleeps after ~15 min idle and takes up to a minute to wake. Open the controller a few minutes
+before the game. Settings saved on the server are lost on a restart (free disk is not persistent); re-import them.
+
+## Copy the settings from REAPER
+1. Select the track with "Escape Room Heartbeat Timer".
+2. Run `Export_Heartbeat_Settings.lua` (Actions -> Show action list -> New action -> Load ReaScript).
+3. Paste the JSON into "Import settings" on the controller and press the button.
+
+## Run locally
+```
+npm install
+CONTROL_PASSWORD=secret npm start     # PowerShell: $env:CONTROL_PASSWORD="secret"; npm start
+```
+Open http://localhost:3000
