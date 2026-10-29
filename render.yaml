@@ -6,6 +6,3 @@ services:
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /healthz
-    envVars:
-      - key: CONTROL_PASSWORD
-        sync: false   # you type the password in the Render dashboard
