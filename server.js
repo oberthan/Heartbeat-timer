@@ -16,10 +16,13 @@ let run = { running: false, startServerMs: 0 };
 let hint = null; // { text, id } - shown on the displays; a new hint replaces the old one
 const LOCKED = 'Locked while the countdown is running. Press Stop first.';
 
-// uploaded heartbeat sound (kept in memory, and on disk so it survives a restart where the disk persists)
+// uploaded track (the whole 30 min audio): streamed to disk while uploading, streamed back with Range support
 const SAMPLE_FILE = path.join(__dirname, 'sample.bin'), SAMPLE_META = path.join(__dirname, 'sample.json');
-let sample = null; // { buf, type, name, version }
-try { const meta = JSON.parse(fs.readFileSync(SAMPLE_META, 'utf8')); sample = { buf: fs.readFileSync(SAMPLE_FILE), ...meta }; } catch {}
+let sample = null; // { type, name, version, size }
+try {
+  const meta = JSON.parse(fs.readFileSync(SAMPLE_META, 'utf8'));
+  sample = { ...meta, size: fs.statSync(SAMPLE_FILE).size };
+} catch {}
 const sampleInfo = () => sample ? { name: sample.name, version: sample.version } : null;
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css', '.ico': 'image/x-icon' };
@@ -28,30 +31,54 @@ function handleUpload(req, res) {
   if (run.running) { res.writeHead(409); return res.end(LOCKED); }
   const type = String(req.headers['content-type'] || '');
   if (!type.startsWith('audio/')) { res.writeHead(415); return res.end('Upload an audio file'); }
-  const chunks = [];
-  req.on('data', c => chunks.push(c));
-  req.on('end', () => {
-    const name = String(req.headers['x-filename'] || 'sound').slice(0, 120);
-    sample = { buf: Buffer.concat(chunks), type, name, version: Date.now() };
-    try { fs.writeFileSync(SAMPLE_FILE, sample.buf); fs.writeFileSync(SAMPLE_META, JSON.stringify({ type, name, version: sample.version })); } catch {}
+  const name = decodeURIComponent(String(req.headers['x-filename'] || 'sound')).slice(0, 120);
+  const tmp = SAMPLE_FILE + '.part';
+  const out = fs.createWriteStream(tmp);
+  let failed = false;
+  const fail = code => { if (failed) return; failed = true; out.destroy(); fs.unlink(tmp, () => {}); if (!res.writableEnded) { res.writeHead(code); res.end('Upload failed'); } };
+  req.on('error', () => fail(400));
+  req.on('aborted', () => fail(400));
+  out.on('error', () => fail(500));
+  out.on('finish', () => {
+    if (failed) return;
+    try {
+      fs.renameSync(tmp, SAMPLE_FILE);
+      sample = { type, name, version: Date.now(), size: fs.statSync(SAMPLE_FILE).size };
+      fs.writeFileSync(SAMPLE_META, JSON.stringify({ type, name, version: sample.version }));
+    } catch { return fail(500); }
     broadcast();
     res.writeHead(200); res.end('ok');
   });
+  req.pipe(out);
+}
+
+function serveSample(req, res) {
+  if (!sample) { res.writeHead(404); return res.end(); }
+  const size = sample.size;
+  const headers = { 'Content-Type': sample.type, 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-cache' };
+  const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+  if (m && (m[1] || m[2])) {
+    let start = m[1] === '' ? Math.max(size - Number(m[2]), 0) : Number(m[1]);
+    let end = m[1] === '' || m[2] === '' ? size - 1 : Math.min(Number(m[2]), size - 1);
+    if (start > end || start >= size) { res.writeHead(416, { 'Content-Range': 'bytes */' + size }); return res.end(); }
+    res.writeHead(206, { ...headers, 'Content-Range': `bytes ${start}-${end}/${size}`, 'Content-Length': end - start + 1 });
+    return fs.createReadStream(SAMPLE_FILE, { start, end }).pipe(res);
+  }
+  res.writeHead(200, { ...headers, 'Content-Length': size });
+  fs.createReadStream(SAMPLE_FILE).pipe(res);
 }
 
 const server = http.createServer((req, res) => {
   if (req.method === 'POST' && req.url.startsWith('/upload')) return handleUpload(req, res);
   if (req.method === 'POST' && req.url === '/sample-clear') {
     if (run.running) { res.writeHead(409); return res.end(LOCKED); }
-    sample = null; try { fs.unlinkSync(SAMPLE_FILE); fs.unlinkSync(SAMPLE_META); } catch {}
+    sample = null; try { fs.unlinkSync(SAMPLE_FILE); } catch {} try { fs.unlinkSync(SAMPLE_META); } catch {}
     broadcast(); res.writeHead(200); return res.end('ok');
   }
   let url = decodeURIComponent((req.url || '/').split('?')[0]);
   if (url === '/') url = '/index.html';
   if (url === '/sample') {
-    if (!sample) { res.writeHead(404); return res.end(); }
-    res.writeHead(200, { 'Content-Type': sample.type, 'Cache-Control': 'no-cache' });
-    return res.end(sample.buf);
+    return serveSample(req, res);
   }
   if (url === '/healthz') { res.writeHead(200); return res.end('ok'); }
   const file = path.normalize(path.join(PUBLIC, url));

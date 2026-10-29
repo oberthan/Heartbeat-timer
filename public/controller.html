@@ -36,7 +36,7 @@
     <div id="status"><span class="dot" id="dot"></span><span id="statusText">Connecting…</span></div>
     <div id="msg"></div>
     <div class="inline">
-      <span>Start in</span><input type="number" id="delay" value="10" min="0" max="600"><span>seconds</span>
+      <span>Start in</span><input type="number" id="delay" value="0" min="0" max="600"><span>seconds</span>
     </div>
     <p style="margin:10px 0 0">
       <button class="go" id="btnStart">Start countdown</button>
@@ -67,15 +67,15 @@
   </div>
 
   <div class="card">
-    <h2 style="margin-top:0">Heartbeat sound</h2>
+    <h2 style="margin-top:0">Heartbeat track</h2>
     <div id="sampleName" style="margin-bottom:8px">Synthesized heartbeat</div>
     <input type="file" id="file" accept="audio/*">
     <p style="margin:10px 0 0">
-      <button id="btnUpload">Upload sound</button>
+      <button id="btnUpload">Upload track</button>
       <button id="btnPreview">Play uploaded</button>
       <button id="btnClear">Remove</button>
     </p>
-    <div style="color:var(--dim);font-size:13px">Use one heartbeat (a lub-dub) as the file, wav, mp3, ogg or m4a. It plays once per beat. Set "Use uploaded sound" to 1 below to switch to it.</div>
+    <div style="color:var(--dim);font-size:13px">Upload the whole heartbeat track (wav, mp3, ogg or m4a). It starts when you press Start and plays through, so any start offset must already be in the audio. The BPM, volume and offset settings below only drive the pulse of the numbers, so set them to match the track. Set "Use uploaded track" to 1 to switch to it.</div>
   </div>
 
   <div class="card" id="controls"></div>
@@ -140,22 +140,33 @@ $('btnStop').onclick = () => send({ type: 'stop' });
 $('btnHint').onclick = () => { const t = $('hintText').value.trim(); if (!t) return; send({ type: 'hint', text: t }); $('hintText').value = ''; };
 $('hintText').onkeydown = e => { if (e.key === 'Enter') $('btnHint').click(); };
 $('btnHintClear').onclick = () => send({ type: 'hint-clear' });
-$('btnUpload').onclick = async () => {
+$('btnUpload').onclick = () => {
   const f = $('file').files[0];
   if (!f) { $('msg').textContent = 'Choose a file first.'; return; }
-  $('msg').textContent = 'Uploading…';
-  try {
-    const r = await fetch('/upload', { method: 'POST', body: f,
-      headers: { 'Content-Type': f.type || 'audio/mpeg', 'x-filename': encodeURIComponent(f.name) } });
-    $('msg').textContent = r.ok ? 'Uploaded.' : 'Upload failed: ' + (await r.text());
-    if (r.ok) { P.useSample = 1; showSettings(); lastLocalEdit = Date.now(); send({ type: 'set', settings: P }); }
-  } catch { $('msg').textContent = 'Upload failed (connection).'; }
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/upload');
+  xhr.setRequestHeader('Content-Type', f.type || 'audio/mpeg');
+  xhr.setRequestHeader('x-filename', encodeURIComponent(f.name));
+  xhr.upload.onprogress = e => { if (e.lengthComputable) $('msg').textContent = 'Uploading… ' + Math.round(100 * e.loaded / e.total) + '%'; };
+  xhr.onerror = () => { $('msg').textContent = 'Upload failed (connection).'; };
+  xhr.onload = () => {
+    $('msg').textContent = xhr.status === 200 ? 'Uploaded.' : 'Upload failed: ' + xhr.responseText;
+    if (xhr.status === 200) { P.useSample = 1; showSettings(); lastLocalEdit = Date.now(); send({ type: 'set', settings: P }); }
+  };
+  $('msg').textContent = 'Uploading… 0%';
+  xhr.send(f);
 };
 $('btnClear').onclick = async () => {
   const r = await fetch('/sample-clear', { method: 'POST',  });
   $('msg').textContent = r.ok ? 'Removed.' : 'Failed: ' + (await r.text());
 };
-$('btnPreview').onclick = () => { const a = new Audio('/sample?t=' + Date.now()); a.play().catch(() => { $('msg').textContent = 'No uploaded sound to play.'; }); };
+let previewEl = null;
+$('btnPreview').onclick = () => {
+  if (previewEl) { previewEl.pause(); previewEl = null; $('btnPreview').textContent = 'Play uploaded'; return; }
+  previewEl = new Audio('/sample?t=' + Date.now());
+  previewEl.onended = () => { previewEl = null; $('btnPreview').textContent = 'Play uploaded'; };
+  previewEl.play().then(() => { $('btnPreview').textContent = 'Stop preview'; }).catch(() => { previewEl = null; $('msg').textContent = 'No uploaded track to play.'; });
+};
 $('btnImport').onclick = () => {
   try {
     const obj = JSON.parse($('imp').value.trim());
