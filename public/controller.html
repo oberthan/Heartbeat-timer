@@ -46,6 +46,20 @@
   </div>
 
   <div class="card">
+    <h2 style="margin-top:0">Hint</h2>
+    <div class="row" style="grid-template-columns:1fr"><input type="text" id="hintText" maxlength="300" placeholder="Type a hint for the players…" style="width:100%;background:#000;color:var(--fg);border:1px solid #333;border-radius:4px;padding:8px;font:inherit"></div>
+    <p style="margin:4px 0 6px">
+      <button class="go" id="btnHint">Send hint</button>
+      <button id="btnHintClear">Remove hint</button>
+    </p>
+    <div style="font-size:13px;color:var(--dim)">On screen now: <span id="hintNow" style="color:var(--fg)">nothing</span></div>
+    <div style="font-size:12px;color:var(--dim);margin-top:4px">Sending a new hint replaces the one on screen.</div>
+  </div>
+
+  <div class="card" id="lockNote" hidden style="color:#e6a23c">Settings are locked while the countdown is running. Press Stop to change them.</div>
+
+  <div id="lockable">
+  <div class="card">
     <h2 style="margin-top:0">Import settings from the plugin</h2>
     <div style="color:var(--dim);font-size:13px;margin-bottom:6px">Run <code>Export_Heartbeat_Settings.lua</code> in REAPER, then paste the result here.</div>
     <textarea id="imp" placeholder='{"dur":45,"bpm0":55,...}'></textarea>
@@ -65,6 +79,7 @@
   </div>
 
   <div class="card" id="controls"></div>
+  </div>
 </main>
 <script src="common.js"></script>
 <script>
@@ -88,7 +103,8 @@ for (const d of DEFS) {
 function showSettings() { for (const id in inputs) { inputs[id][0].value = P[id]; inputs[id][1].value = P[id]; } }
 showSettings();
 
-function queueSend() { clearTimeout(sendTimer); sendTimer = setTimeout(() => send({ type: 'set', settings: P }), 250); }
+let locked = false;
+function queueSend() { if (locked) return; clearTimeout(sendTimer); sendTimer = setTimeout(() => send({ type: 'set', settings: P }), 250); }
 function send(m) {
   if (!wsOpen) { $('msg').textContent = 'Not connected.'; return; }
   ws.send(JSON.stringify(m));
@@ -106,6 +122,9 @@ function connect() {
     $('msg').textContent = '';
     if (Date.now() - lastLocalEdit > 900) { P = cleanSettings(m.settings); showSettings(); }
     $('dot').className = 'dot on';
+    locked = m.run.running;
+    $('lockable').hidden = locked; $('lockNote').hidden = !locked;
+    $('hintNow').textContent = m.hint ? m.hint.text : 'nothing';
     $('sampleName').textContent = m.sample ? 'Uploaded: ' + m.sample.name : 'Synthesized heartbeat (no file uploaded)';
     let t = m.run.running ? 'RUNNING' : 'Idle';
     if (m.run.running && m.run.startServerMs > m.serverNow) t = 'Starting in ' + Math.ceil((m.run.startServerMs - m.serverNow) / 1000) + 's';
@@ -116,8 +135,11 @@ connect();
 setInterval(() => { if (wsOpen) ws.send(JSON.stringify({ type: 'hello', role: 'controller' })); }, 1000);
 
 // ---------- buttons ----------
-$('btnStart').onclick = () => { send({ type: 'set', settings: P }); send({ type: 'start', delaySec: parseFloat($('delay').value) || 0 }); };
+$('btnStart').onclick = () => { if (!locked) send({ type: 'set', settings: P }); send({ type: 'start', delaySec: parseFloat($('delay').value) || 0 }); };
 $('btnStop').onclick = () => send({ type: 'stop' });
+$('btnHint').onclick = () => { const t = $('hintText').value.trim(); if (!t) return; send({ type: 'hint', text: t }); $('hintText').value = ''; };
+$('hintText').onkeydown = e => { if (e.key === 'Enter') $('btnHint').click(); };
+$('btnHintClear').onclick = () => send({ type: 'hint-clear' });
 $('btnUpload').onclick = async () => {
   const f = $('file').files[0];
   if (!f) { $('msg').textContent = 'Choose a file first.'; return; }

@@ -59,6 +59,8 @@ function onState(m) {
   P = cleanSettings(m.settings);
   if (ctx && oldRev !== P.revLen + '/' + P.revDamp) buildReverb();
   sampleInfo = m.sample; loadSample();
+  if ((m.hint && m.hint.id) !== (hint && hint.id)) hintSince = performance.now();
+  hint = m.hint;
   const key = m.run.running ? m.run.startServerMs : null;
   run = m.run;
   if (key !== lastRunKey) { lastRunKey = key; key ? beginRun() : endRun(); }
@@ -159,6 +161,7 @@ function schedule(pos) {
 setInterval(() => { if (run.running && armed) schedule(posNow()); }, 100);
 
 // ---------- drawing ----------
+let hint = null, hintSince = 0;
 const cv = document.getElementById('cv'), g2 = cv.getContext('2d');
 function fit() { const d = devicePixelRatio || 1; cv.width = innerWidth * d; cv.height = innerHeight * d; }
 addEventListener('resize', fit); fit();
@@ -171,6 +174,22 @@ function pulseLevel(pos) {
     const b = pos - h.t - h.gap; if (b >= 0) v += Math.exp(-b / P.decay) * P.dub * k * 0.7;
   }
   return clamp(v, 0, 1.2);
+}
+function drawHint(W, H) {
+  const size = Math.round(H * 0.055), maxW = W * 0.84;
+  g2.font = `${size}px Arial, sans-serif`;
+  const lines = []; let line = '';
+  for (const word of hint.text.split(/\s+/)) {
+    const test = line ? line + ' ' + word : word;
+    if (line && g2.measureText(test).width > maxW) { lines.push(line); line = word; } else line = test;
+  }
+  if (line) lines.push(line);
+  const shown = lines.slice(0, 5), lh = size * 1.3;
+  const fade = clamp((performance.now() - hintSince) / 600, 0, 1);
+  g2.globalAlpha = fade;
+  g2.fillStyle = '#d8d8d8'; g2.textAlign = 'center'; g2.textBaseline = 'middle';
+  shown.forEach((l, i) => g2.fillText(l, W / 2, H * 0.94 - (shown.length - 1 - i) * lh));
+  g2.globalAlpha = 1;
 }
 function frame() {
   const W = cv.width, H = cv.height;
@@ -191,6 +210,7 @@ function frame() {
   g2.font = `700 ${Math.round(H * P.tsize)}px Arial, sans-serif`;
   g2.fillText(fmtTime(left), 0, 0);
   g2.restore();
+  if (hint) drawHint(W, H);
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);

@@ -18,6 +18,13 @@ joins (or reloads) mid-run jumps to the right point.
 Free plan note: the service sleeps after ~15 min idle and takes up to a minute to wake. Open the controller a few minutes
 before the game. Settings saved on the server are lost on a restart (free disk is not persistent); re-import them.
 
+## Hints and locking
+- The controller has a **Hint** box. Sending a hint shows it at the bottom of every display; a new hint replaces the one
+  on screen, and "Remove hint" clears it. Hints work any time, also while the countdown is running.
+- While the countdown is running (from pressing Start until you press Stop) the settings, import, sound upload and
+  sound removal are hidden on the controller, and the server refuses those changes too. Press Stop to edit again.
+  Start is also refused while running, so the timer can't be restarted by accident.
+
 ## Copy the settings from REAPER
 1. Select the track with "Escape Room Heartbeat Timer".
 2. Run `Export_Heartbeat_Settings.lua` (Actions -> Show action list -> New action -> Load ReaScript).

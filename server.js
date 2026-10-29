@@ -13,6 +13,8 @@ const SETTINGS_FILE = path.join(__dirname, 'settings.json');
 let settings = defaultSettings();
 try { settings = cleanSettings(JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'))); } catch {}
 let run = { running: false, startServerMs: 0 };
+let hint = null; // { text, id } - shown on the displays; a new hint replaces the old one
+const LOCKED = 'Locked while the countdown is running. Press Stop first.';
 
 // uploaded heartbeat sound (kept in memory, and on disk so it survives a restart where the disk persists)
 const SAMPLE_FILE = path.join(__dirname, 'sample.bin'), SAMPLE_META = path.join(__dirname, 'sample.json');
@@ -23,6 +25,7 @@ const sampleInfo = () => sample ? { name: sample.name, version: sample.version }
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css', '.ico': 'image/x-icon' };
 
 function handleUpload(req, res) {
+  if (run.running) { res.writeHead(409); return res.end(LOCKED); }
   const type = String(req.headers['content-type'] || '');
   if (!type.startsWith('audio/')) { res.writeHead(415); return res.end('Upload an audio file'); }
   const chunks = [];
@@ -39,6 +42,7 @@ function handleUpload(req, res) {
 const server = http.createServer((req, res) => {
   if (req.method === 'POST' && req.url.startsWith('/upload')) return handleUpload(req, res);
   if (req.method === 'POST' && req.url === '/sample-clear') {
+    if (run.running) { res.writeHead(409); return res.end(LOCKED); }
     sample = null; try { fs.unlinkSync(SAMPLE_FILE); fs.unlinkSync(SAMPLE_META); } catch {}
     broadcast(); res.writeHead(200); return res.end('ok');
   }
@@ -66,7 +70,7 @@ function counts() {
   for (const c of wss.clients) if (c.role === 'display') { displays++; if (c.armed) armed++; }
   return { displays, armed };
 }
-function stateMsg() { return JSON.stringify({ type: 'state', settings, run, sample: sampleInfo(), ...counts(), serverNow: Date.now() }); }
+function stateMsg() { return JSON.stringify({ type: 'state', settings, run, sample: sampleInfo(), hint, ...counts(), serverNow: Date.now() }); }
 function broadcast() { const m = stateMsg(); for (const c of wss.clients) if (c.readyState === 1) c.send(m); }
 
 wss.on('connection', ws => {
@@ -87,16 +91,27 @@ wss.on('connection', ws => {
         ws.armed = !!msg.armed; broadcast();
         break;
       case 'set':
+        if (run.running) return ws.send(JSON.stringify({ type: 'error', error: LOCKED }));
         settings = cleanSettings(msg.settings, settings);
         try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings)); } catch {}
         broadcast();
         break;
       case 'start': {
+        if (run.running) return ws.send(JSON.stringify({ type: 'error', error: 'Already running. Press Stop first.' }));
         const delay = Math.min(Math.max(Number(msg.delaySec) || 0, 0), 600);
         run = { running: true, startServerMs: Date.now() + delay * 1000 };
         broadcast();
         break;
       }
+      case 'hint': {
+        const text = String(msg.text || '').trim().slice(0, 300);
+        hint = text ? { text, id: Date.now() } : null;
+        broadcast();
+        break;
+      }
+      case 'hint-clear':
+        hint = null; broadcast();
+        break;
       case 'stop':
         run = { running: false, startServerMs: 0 };
         broadcast();
