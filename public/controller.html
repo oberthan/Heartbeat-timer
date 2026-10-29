@@ -35,6 +35,7 @@
   <div class="card">
     <div id="status"><span class="dot" id="dot"></span><span id="statusText">Connecting…</span></div>
     <div id="msg"></div>
+    <div id="trackWarn" hidden style="color:#e6a23c;font-size:13px;margin-bottom:6px"></div>
     <div class="inline">
       <span>Start in</span><input type="number" id="delay" value="0" min="0" max="600"><span>seconds</span>
     </div>
@@ -52,6 +53,9 @@
       <button class="go" id="btnHint">Send hint</button>
       <button id="btnHintClear">Remove hint</button>
     </p>
+    <div style="font-size:13px;margin:0 0 8px"><label><input type="checkbox" id="hintSound"> Play a chime when the hint appears</label>
+      <span style="color:var(--dim)"> level </span><input type="range" id="hintDb" min="-30" max="0" step="1" value="-8" style="width:110px;vertical-align:middle"> <span id="hintDbVal" style="color:var(--dim)">-8 dB</span>
+      <button id="btnChime" style="padding:4px 10px;margin:0 0 0 6px" title="Plays on the displays">Test chime</button></div>
     <div style="font-size:13px;color:var(--dim)">On screen now: <span id="hintNow" style="color:var(--fg)">nothing</span></div>
     <div style="font-size:12px;color:var(--dim);margin-top:4px">Sending a new hint replaces the one on screen.</div>
   </div>
@@ -104,7 +108,60 @@ function showSettings() { for (const id in inputs) { inputs[id][0].value = P[id]
 showSettings();
 
 let locked = false;
-function queueSend() { if (locked) return; clearTimeout(sendTimer); sendTimer = setTimeout(() => send({ type: 'set', settings: P }), 250); }
+
+// ---------- backup in this browser (the server forgets everything when it sleeps on a free plan) ----------
+const lsGet = k => { try { return localStorage.getItem(k); } catch { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
+const idb = () => new Promise((res, rej) => {
+  const r = indexedDB.open('heartbeat', 1);
+  r.onupgradeneeded = () => r.result.createObjectStore('files');
+  r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+});
+const idbPut = async (k, v) => { const db = await idb(); return new Promise((res, rej) => { const t = db.transaction('files', 'readwrite'); t.objectStore('files').put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); }); };
+const idbGet = async k => { try { const db = await idb(); return await new Promise((res, rej) => { const q = db.transaction('files').objectStore('files').get(k); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); } catch { return null; } };
+const idbDel = async k => { try { const db = await idb(); db.transaction('files', 'readwrite').objectStore('files').delete(k); } catch {} };
+
+let restoring = false, restoreRetryAt = 0;
+function uploadFile(file, name, type, restore) {
+  return new Promise(resolve => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/upload');
+    xhr.setRequestHeader('Content-Type', type || file.type || 'audio/mpeg');
+    xhr.setRequestHeader('x-filename', encodeURIComponent(name));
+    const label = restore ? 'Restoring track from this browser… ' : 'Uploading… ';
+    xhr.upload.onprogress = e => { if (e.lengthComputable) $('msg').textContent = label + Math.round(100 * e.loaded / e.total) + '%'; };
+    xhr.onerror = () => { $('msg').textContent = 'Upload failed (connection).'; resolve(false); };
+    xhr.onload = () => {
+      const ok = xhr.status === 200;
+      $('msg').textContent = ok ? (restore ? 'Track restored.' : 'Uploaded.') : 'Upload failed: ' + xhr.responseText;
+      resolve(ok);
+    };
+    $('msg').textContent = label + '0%';
+    xhr.send(file);
+  });
+}
+let settingsRestoreSent = false;
+async function restoreBackups(m) {
+  if (m.run.running || restoring) return;
+  if (m.fresh) { // the server has no settings: put back the last ones this browser knew (once)
+    if (!settingsRestoreSent) {
+      settingsRestoreSent = true;
+      const saved = lsGet('hb_settings');
+      if (saved) { try { P = cleanSettings(JSON.parse(saved)); showSettings(); lastLocalEdit = Date.now(); send({ type: 'set', settings: P }); $('msg').textContent = 'Settings restored from this browser.'; } catch {} }
+    }
+  } else settingsRestoreSent = false;
+  if (!m.sample && Date.now() > restoreRetryAt) {
+    restoring = true; // set before any await, so only one restore can run at a time
+    try {
+      const rec = await idbGet('track');
+      if (rec && rec.blob) {
+        if (!(await uploadFile(rec.blob, rec.name, rec.type, true))) restoreRetryAt = Date.now() + 20000;
+      } else restoreRetryAt = Date.now() + 5000; // nothing backed up here
+    } finally { restoring = false; }
+  }
+}
+
+function queueSend() { if (locked) return; clearTimeout(sendTimer); sendTimer = setTimeout(() => { lsSet('hb_settings', JSON.stringify(P)); send({ type: 'set', settings: P }); }, 250); }
 function send(m) {
   if (!wsOpen) { $('msg').textContent = 'Not connected.'; return; }
   ws.send(JSON.stringify(m));
@@ -119,8 +176,13 @@ function connect() {
     const m = JSON.parse(e.data);
     if (m.type === 'error') { $('msg').textContent = m.error; return; }
     if (m.type !== 'state') return;
-    $('msg').textContent = '';
+    if (!restoring && !/^(Restor|Upload|Track restored|Settings restored)/.test($('msg').textContent)) $('msg').textContent = '';
     if (Date.now() - lastLocalEdit > 900) { P = cleanSettings(m.settings); showSettings(); }
+    if (!m.fresh) lsSet('hb_settings', JSON.stringify(cleanSettings(m.settings)));
+    restoreBackups(m);
+    const missing = m.settings.useSample >= 0.5 && !m.sample;
+    $('trackWarn').hidden = !missing;
+    $('trackWarn').textContent = 'Warning: "Use uploaded track" is on but the server has no track. Upload it (or wait for the automatic restore) before starting.';
     $('dot').className = 'dot on';
     locked = m.run.running;
     $('lockable').hidden = locked; $('lockNote').hidden = !locked;
@@ -137,27 +199,30 @@ setInterval(() => { if (wsOpen) ws.send(JSON.stringify({ type: 'hello', role: 'c
 // ---------- buttons ----------
 $('btnStart').onclick = () => { if (!locked) send({ type: 'set', settings: P }); send({ type: 'start', delaySec: parseFloat($('delay').value) || 0 }); };
 $('btnStop').onclick = () => send({ type: 'stop' });
-$('btnHint').onclick = () => { const t = $('hintText').value.trim(); if (!t) return; send({ type: 'hint', text: t }); $('hintText').value = ''; };
+$('hintSound').checked = lsGet('hb_hintSound') === '1';
+$('hintDb').value = lsGet('hb_hintDb') || '-8'; $('hintDbVal').textContent = $('hintDb').value + ' dB';
+$('hintSound').onchange = () => lsSet('hb_hintSound', $('hintSound').checked ? '1' : '0');
+$('hintDb').oninput = () => { $('hintDbVal').textContent = $('hintDb').value + ' dB'; lsSet('hb_hintDb', $('hintDb').value); };
+const hintSoundOpts = () => ({ sound: $('hintSound').checked, soundDb: parseFloat($('hintDb').value) });
+$('btnHint').onclick = () => { const t = $('hintText').value.trim(); if (!t) return; send({ type: 'hint', text: t, ...hintSoundOpts() }); $('hintText').value = ''; };
+$('btnChime').onclick = () => { const cur = $('hintNow').textContent; send({ type: 'hint', text: cur && cur !== 'nothing' ? cur : 'Test hint', sound: true, soundDb: parseFloat($('hintDb').value) }); };
 $('hintText').onkeydown = e => { if (e.key === 'Enter') $('btnHint').click(); };
 $('btnHintClear').onclick = () => send({ type: 'hint-clear' });
-$('btnUpload').onclick = () => {
+$('btnUpload').onclick = async () => {
   const f = $('file').files[0];
   if (!f) { $('msg').textContent = 'Choose a file first.'; return; }
-  const xhr = new XMLHttpRequest();
-  xhr.open('POST', '/upload');
-  xhr.setRequestHeader('Content-Type', f.type || 'audio/mpeg');
-  xhr.setRequestHeader('x-filename', encodeURIComponent(f.name));
-  xhr.upload.onprogress = e => { if (e.lengthComputable) $('msg').textContent = 'Uploading… ' + Math.round(100 * e.loaded / e.total) + '%'; };
-  xhr.onerror = () => { $('msg').textContent = 'Upload failed (connection).'; };
-  xhr.onload = () => {
-    $('msg').textContent = xhr.status === 200 ? 'Uploaded.' : 'Upload failed: ' + xhr.responseText;
-    if (xhr.status === 200) { P.useSample = 1; showSettings(); lastLocalEdit = Date.now(); send({ type: 'set', settings: P }); }
-  };
-  $('msg').textContent = 'Uploading… 0%';
-  xhr.send(f);
+  const ok = await uploadFile(f, f.name, f.type, false);
+  if (ok) {
+    P.useSample = 1; showSettings(); lastLocalEdit = Date.now(); lsSet('hb_settings', JSON.stringify(P)); send({ type: 'set', settings: P });
+    try { await idbPut('track', { blob: f, name: f.name, type: f.type || 'audio/mpeg' }); } catch { $('msg').textContent = 'Uploaded (could not keep a backup copy in this browser).'; }
+  }
 };
 $('btnClear').onclick = async () => {
-  const r = await fetch('/sample-clear', { method: 'POST',  });
+  const r = await fetch('/sample-clear', { method: 'POST' });
+  if (r.ok) {
+    await idbDel('track'); // also drop the backup, or it would be restored again
+    P.useSample = 0; showSettings(); lastLocalEdit = Date.now(); lsSet('hb_settings', JSON.stringify(P)); send({ type: 'set', settings: P }); // back to the synthesized sound
+  }
   $('msg').textContent = r.ok ? 'Removed.' : 'Failed: ' + (await r.text());
 };
 let previewEl = null;

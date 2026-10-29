@@ -1,4 +1,4 @@
-# Heartbeat countdown (Render)
+﻿# Heartbeat countdown (Render)
 
 Realtime heartbeat sound + countdown video, generated in the browser. A controller device starts it remotely.
 
@@ -18,11 +18,26 @@ joins (or reloads) mid-run jumps to the right point.
 Free plan note: the service sleeps after ~15 min idle and takes up to a minute to wake. Open the controller a few minutes
 before the game. Settings saved on the server are lost on a restart (free disk is not persistent); re-import them.
 
+## Settings and track on Render (the free plan forgets them)
+A free Render service sleeps after ~15 minutes idle and its disk is wiped when it wakes, so the server loses the settings
+and the uploaded track. Two ways to deal with that:
+
+1. **Free, automatic.** The controller keeps a backup in its own browser (settings in localStorage, the track in
+   IndexedDB). When it connects to a server that has forgotten them, it puts the settings back and re-uploads the track by
+   itself ("Restoring track from this browser…"). So: use the same browser/device for the controller, and open it a few
+   minutes before the game (a long track takes a while to upload again). Clearing that browser's site data deletes the
+   backup. "Remove" deletes the track from both the server and the backup.
+2. **Permanent.** Use a Render instance type that supports a persistent disk, add a disk (for example mounted at
+   `/var/data`) and set the environment variable `DATA_DIR=/var/data`. The server then keeps settings and the track
+   there and nothing needs restoring. (Paid instances also don't sleep.)
 ## Hints and locking
 - The controller has a **Hint** box. Sending a hint makes the countdown glide up and shrink, then fades the hint in below it
   in large text (it picks the biggest size that fits, up to 300 characters). A new hint fades the old one out and the new
   one in; "Remove hint" fades it out and the countdown eases back to the middle. Hints work any time, also while the
   countdown is running.
+- Tick **Play a chime when the hint appears** (with a level slider and a "Test chime" button) to have the displays play a
+  soft two-note bell when a hint is sent. It is off by default, is remembered in the controller, and is only played for a
+  newly sent hint, not when a display reloads while a hint is already showing.
 - While the countdown is running (from pressing Start until you press Stop) the settings, import, sound upload and
   sound removal are hidden on the controller, and the server refuses those changes too. Press Stop to edit again.
   Start is also refused while running, so the timer can't be restarted by accident.

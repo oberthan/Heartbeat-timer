@@ -8,16 +8,21 @@ const { defaultSettings, cleanSettings } = require('./public/common.js');
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC = path.join(__dirname, 'public');
-const SETTINGS_FILE = path.join(__dirname, 'settings.json');
+// Where settings and the uploaded track are stored. On a host with a persistent disk, point DATA_DIR at it
+// (Render: mount a disk at /var/data and set DATA_DIR=/var/data). Otherwise it is the app folder (wiped on restart).
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 
 let settings = defaultSettings();
-try { settings = cleanSettings(JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'))); } catch {}
+let fresh = true; // true until settings were loaded from disk or set by a controller (so a controller can restore its backup)
+try { settings = cleanSettings(JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'))); fresh = false; } catch {}
 let run = { running: false, startServerMs: 0 };
 let hint = null; // { text, id } - shown on the displays; a new hint replaces the old one
 const LOCKED = 'Locked while the countdown is running. Press Stop first.';
 
 // uploaded track (the whole 30 min audio): streamed to disk while uploading, streamed back with Range support
-const SAMPLE_FILE = path.join(__dirname, 'sample.bin'), SAMPLE_META = path.join(__dirname, 'sample.json');
+const SAMPLE_FILE = path.join(DATA_DIR, 'sample.bin'), SAMPLE_META = path.join(DATA_DIR, 'sample.json');
 let sample = null; // { type, name, version, size }
 try {
   const meta = JSON.parse(fs.readFileSync(SAMPLE_META, 'utf8'));
@@ -32,7 +37,7 @@ function handleUpload(req, res) {
   const type = String(req.headers['content-type'] || '');
   if (!type.startsWith('audio/')) { res.writeHead(415); return res.end('Upload an audio file'); }
   const name = decodeURIComponent(String(req.headers['x-filename'] || 'sound')).slice(0, 120);
-  const tmp = SAMPLE_FILE + '.part';
+  const tmp = SAMPLE_FILE + '.' + Date.now() + '-' + Math.random().toString(36).slice(2, 8) + '.part';
   const out = fs.createWriteStream(tmp);
   let failed = false;
   const fail = code => { if (failed) return; failed = true; out.destroy(); fs.unlink(tmp, () => {}); if (!res.writableEnded) { res.writeHead(code); res.end('Upload failed'); } };
@@ -97,7 +102,7 @@ function counts() {
   for (const c of wss.clients) if (c.role === 'display') { displays++; if (c.armed) armed++; }
   return { displays, armed };
 }
-function stateMsg() { return JSON.stringify({ type: 'state', settings, run, sample: sampleInfo(), hint, ...counts(), serverNow: Date.now() }); }
+function stateMsg() { return JSON.stringify({ type: 'state', settings, run, sample: sampleInfo(), hint, fresh, ...counts(), serverNow: Date.now() }); }
 function broadcast() { const m = stateMsg(); for (const c of wss.clients) if (c.readyState === 1) c.send(m); }
 
 wss.on('connection', ws => {
@@ -120,6 +125,7 @@ wss.on('connection', ws => {
       case 'set':
         if (run.running) return ws.send(JSON.stringify({ type: 'error', error: LOCKED }));
         settings = cleanSettings(msg.settings, settings);
+        fresh = false;
         try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings)); } catch {}
         broadcast();
         break;
@@ -132,7 +138,9 @@ wss.on('connection', ws => {
       }
       case 'hint': {
         const text = String(msg.text || '').trim().slice(0, 300);
-        hint = text ? { text, id: Date.now() } : null;
+        // 'sound' = play a chime on the displays when this hint appears, at soundDb dB
+        const soundDb = Math.min(Math.max(Number(msg.soundDb) || -8, -40), 0);
+        hint = text ? { text, id: Date.now(), sound: !!msg.sound, soundDb } : null;
         broadcast();
         break;
       }

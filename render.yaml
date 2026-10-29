@@ -1,4 +1,4 @@
-services:
+﻿services:
   - type: web
     name: heartbeat-countdown
     runtime: node
@@ -6,3 +6,9 @@ services:
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /healthz
+    # To keep settings and the uploaded track across restarts, use an instance type that supports a disk, then add:
+    # disk:
+    #   name: data
+    #   mountPath: /var/data
+    #   sizeGB: 1
+    # and set the environment variable DATA_DIR=/var/data
