@@ -26,6 +26,10 @@
   #msg { color:#e6a23c; min-height:1.4em; font-size:13px; }
   .inline { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   .inline input { width:90px; }
+  .hintopts { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px 12px; margin:0 0 8px; }
+  .hintopts label { font-size:12px; color:var(--dim); display:block; }
+  .hintopts select, .hintopts input[type=number] { width:100%; margin-top:3px; background:#000; color:var(--fg); border:1px solid #333; border-radius:4px; padding:7px 8px; font:inherit; font-size:14px; }
+  .hintopts input[type=range] { margin-top:8px; }
 
   /* live preview: a small window pinned to the bottom-right corner, tap to enlarge */
   :root { --pw: clamp(150px, 26vw, 340px); }
@@ -51,6 +55,7 @@
 
   <div class="card">
     <div id="status"><span class="dot" id="dot"></span><span id="statusText">Connecting…</span></div>
+    <div id="displayList" style="font-size:12px;margin:3px 0 6px"></div>
     <div id="msg"></div>
     <div id="trackWarn" hidden style="color:#e6a23c;font-size:13px;margin-bottom:6px"></div>
     <div class="inline">
@@ -70,9 +75,26 @@
       <button class="go" id="btnHint">Send hint</button>
       <button id="btnHintClear">Remove hint</button>
     </p>
-    <div style="font-size:13px;margin:0 0 8px"><label><input type="checkbox" id="hintSound"> Play a chime when the hint appears</label>
-      <span style="color:var(--dim)"> level </span><input type="range" id="hintDb" min="-30" max="0" step="1" value="-8" style="width:110px;vertical-align:middle"> <span id="hintDbVal" style="color:var(--dim)">-8 dB</span>
-      <button id="btnChime" style="padding:4px 10px;margin:0 0 0 6px" title="Plays on the displays">Test chime</button></div>
+    <div class="hintopts">
+      <label>How obvious
+        <select id="hintStyle">
+          <option value="0">Normal</option>
+          <option value="1">Highlighted</option>
+          <option value="2">Full screen</option>
+        </select></label>
+      <label id="holdWrap">Full screen for (seconds)
+        <input type="number" id="hintHold" min="3" max="60" value="10"></label>
+      <label>Chime
+        <select id="hintChimes">
+          <option value="0">Off</option>
+          <option value="1">Once</option>
+          <option value="3">Three times</option>
+        </select></label>
+      <label>Chime level <span id="hintDbVal">-8 dB</span>
+        <input type="range" id="hintDb" min="-30" max="0" step="1" value="-8" style="width:100%"></label>
+    </div>
+    <div id="hintStyleNote" style="font-size:12px;color:var(--dim);margin:-2px 0 8px"></div>
+    <p style="margin:0 0 8px"><button id="btnChime" style="padding:8px 14px" title="Sends the hint on screen again with these alert settings (or a test hint)">Replay alert</button></p>
     <div style="font-size:13px;color:var(--dim)">On screen now: <span id="hintNow" style="color:var(--fg)">nothing</span></div>
     <div style="font-size:12px;color:var(--dim);margin-top:4px">Sending a new hint replaces the one on screen.</div>
   </div>
@@ -129,7 +151,34 @@ for (const d of DEFS) {
 function showSettings() { for (const id in inputs) { inputs[id][0].value = P[id]; inputs[id][1].value = P[id]; } }
 showSettings();
 
-let locked = false;
+let locked = false, lastState = null;
+
+// ---------- displays: is each one armed, and is its sound ready? ----------
+const SOUND_TEXT = d => ({ ready: 'sound ready', starting: 'sound starting', loading: 'downloading sound ' + (d.pct || 0) + '%', blocked: 'SOUND BLOCKED (tap the display)',
+  error: 'sound file problem', missing: 'no sound file on the server', off: 'no track needed', unknown: 'sound status unknown' }[d.sound] || d.sound);
+function renderDisplays(m) {
+  const box = $('displayList'); box.textContent = '';
+  if (!m.displayList.length) { box.textContent = 'No display connected. Open /display.html on the room screen.'; box.style.color = '#e6a23c'; return; }
+  m.displayList.forEach((d, i) => {
+    const bad = !d.armed || ['blocked', 'error', 'missing'].includes(d.sound) || (m.settings.useSample >= 0.5 && ['loading', 'unknown'].includes(d.sound));
+    const row = document.createElement('div');
+    row.style.color = bad ? '#e6a23c' : 'var(--dim)';
+    row.textContent = `Display ${i + 1}: ${d.armed ? 'armed' : 'not armed (tap it)'} · ${SOUND_TEXT(d)}`;
+    box.appendChild(row);
+  });
+}
+function startProblems() { // things worth knowing before pressing Start
+  if (!lastState) return [];
+  const list = lastState.displayList, p = [];
+  if (!list.length) p.push('No display is connected.');
+  else if (!list.some(d => d.armed)) p.push('No display is armed (tap the display once).');
+  list.forEach((d, i) => {
+    if (!d.armed) return;
+    if (d.sound === 'blocked') p.push(`Display ${i + 1}: the sound is blocked.`);
+    if (lastState.settings.useSample >= 0.5 && ['loading', 'error', 'missing'].includes(d.sound)) p.push(`Display ${i + 1}: the sound is not ready (${SOUND_TEXT(d)}).`);
+  });
+  return p;
+}
 
 // ---------- preview window: tap to enlarge / shrink ----------
 const pv = $('preview');
@@ -221,21 +270,31 @@ function connect() {
     let t = m.run.running ? 'RUNNING' : 'Idle';
     if (m.run.running && m.run.startServerMs > m.serverNow) t = 'Starting in ' + Math.ceil((m.run.startServerMs - m.serverNow) / 1000) + 's';
     $('statusText').textContent = `${t} · ${m.displays} display(s), ${m.armed} armed`;
+    lastState = m; renderDisplays(m);
   };
 }
 connect();
 setInterval(() => { if (wsOpen) ws.send(JSON.stringify({ type: 'hello', role: 'controller' })); }, 1000);
 
 // ---------- buttons ----------
-$('btnStart').onclick = () => { if (!locked) send({ type: 'set', settings: P }); send({ type: 'start', delaySec: parseFloat($('delay').value) || 0 }); };
+$('btnStart').onclick = () => { const probs = startProblems(); if (probs.length && !confirm(probs.join('\n') + '\n\nStart anyway?')) return; if (!locked) send({ type: 'set', settings: P }); send({ type: 'start', delaySec: parseFloat($('delay').value) || 0 }); };
 $('btnStop').onclick = () => send({ type: 'stop' });
-$('hintSound').checked = lsGet('hb_hintSound') === '1';
+// alert options for hints, remembered in this browser
+if (lsGet('hb_hintChimes') === null && lsGet('hb_hintSound') === '1') lsSet('hb_hintChimes', '1'); // from the older checkbox
+for (const [id, key, def] of [['hintStyle', 'hb_hintStyle', '0'], ['hintChimes', 'hb_hintChimes', '0'], ['hintHold', 'hb_hintHold', '10']]) {
+  const el = $(id); el.value = lsGet(key) || def;
+  el.onchange = el.oninput = () => { lsSet(key, el.value); showHold(); };
+}
+const STYLE_NOTE = { 0: 'The hint fades in below the countdown.',
+  1: 'The screen flashes, a white border pulses for a few seconds, and a "NEW HINT" label shows above the text.',
+  2: 'The hint takes over the whole screen in huge text for the chosen time, then settles below the countdown.' };
+function showHold() { $('holdWrap').style.opacity = $('hintStyle').value === '2' ? 1 : 0.45; $('hintStyleNote').textContent = STYLE_NOTE[$('hintStyle').value]; }
+showHold();
 $('hintDb').value = lsGet('hb_hintDb') || '-8'; $('hintDbVal').textContent = $('hintDb').value + ' dB';
-$('hintSound').onchange = () => lsSet('hb_hintSound', $('hintSound').checked ? '1' : '0');
 $('hintDb').oninput = () => { $('hintDbVal').textContent = $('hintDb').value + ' dB'; lsSet('hb_hintDb', $('hintDb').value); };
-const hintSoundOpts = () => ({ sound: $('hintSound').checked, soundDb: parseFloat($('hintDb').value) });
-$('btnHint').onclick = () => { const t = $('hintText').value.trim(); if (!t) return; send({ type: 'hint', text: t, ...hintSoundOpts() }); $('hintText').value = ''; };
-$('btnChime').onclick = () => { const cur = $('hintNow').textContent; send({ type: 'hint', text: cur && cur !== 'nothing' ? cur : 'Test hint', sound: true, soundDb: parseFloat($('hintDb').value) }); };
+const hintOpts = () => ({ style: +$('hintStyle').value, holdSec: parseFloat($('hintHold').value) || 10, chimes: +$('hintChimes').value, soundDb: parseFloat($('hintDb').value) });
+$('btnHint').onclick = () => { const t = $('hintText').value.trim(); if (!t) return; send({ type: 'hint', text: t, ...hintOpts() }); $('hintText').value = ''; };
+$('btnChime').onclick = () => { const cur = $('hintNow').textContent; send({ type: 'hint', text: cur && cur !== 'nothing' ? cur : 'Test hint', ...hintOpts() }); };
 $('hintText').onkeydown = e => { if (e.key === 'Enter') $('btnHint').click(); };
 $('btnHintClear').onclick = () => send({ type: 'hint-clear' });
 $('btnUpload').onclick = async () => {

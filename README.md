@@ -37,9 +37,13 @@ and the uploaded track. Two ways to deal with that:
   in large text (it picks the biggest size that fits, up to 300 characters). A new hint fades the old one out and the new
   one in; "Remove hint" fades it out and the countdown eases back to the middle. Hints work any time, also while the
   countdown is running.
-- Tick **Play a chime when the hint appears** (with a level slider and a "Test chime" button) to have the displays play a
-  soft two-note bell when a hint is sent. It is off by default, is remembered in the controller, and is only played for a
-  newly sent hint, not when a display reloads while a hint is already showing.
+- **How obvious** (chosen per hint, remembered in the controller): *Normal*; *Highlighted* (the screen flashes, a white
+  border pulses for a few seconds and a "NEW HINT" label shows above the text); or *Full screen* (the hint takes over the
+  whole screen in huge text for the chosen number of seconds, with the countdown shrunk at the top, then settles into the
+  normal layout below the countdown).
+- **Chime**: off, once, or three times, with a level slider. "Replay alert" sends the hint on screen again with the
+  current alert settings (or a test hint if there is none). Alerts and chimes only fire for a newly sent hint, not when a
+  display reloads while a hint is already showing.
 - While the countdown is running (from pressing Start until you press Stop) the settings, import, sound upload and
   sound removal are hidden on the controller, and the server refuses those changes too. Press Stop to edit again.
   Start is also refused while running, so the timer can't be restarted by accident.
@@ -58,8 +62,19 @@ On the controller, choose the whole heartbeat track (wav/mp3/ogg/m4a, any length
 - Sound arrives later than the picture because of the device's audio output delay (worse over Bluetooth). The display
   plays the sound earlier by the delay the browser reports, and the "Sound earlier than picture (ms)" slider adds to that.
   If the sound still feels late, raise it in steps of 20-50 ms; if it feels early, lower it (it can go negative).
-- The file is stored on the server's disk and streamed to the displays (it is not loaded into memory), so long
-  tracks are fine. On Render's free plan the disk is wiped on a restart, so upload it again if that happens.
+- **Download first, play locally.** As soon as "Use uploaded track" is on, every display downloads the whole file (even
+  before it is armed) and keeps it in the browser cache, so a reload doesn't need the server again. At the start time it
+  plays that local copy and keeps it locked to the shared clock. Nothing is streamed during the game, and a display that
+  already has the track keeps playing it even if the server forgets the file (Render sleeping).
+- The controller lists each display ("Display 1: armed · sound ready", "downloading sound 42%", "SOUND BLOCKED") and asks
+  before Start if no display is armed or a sound isn't ready.
+- If the browser blocks audio (screen locked, tab hidden, page reloaded without a tap) the display shows
+  "SOUND OFF - tap the screen" in the corner, reports it to the controller and tries to recover by itself; a tap fixes it.
+  With the level at 0 dB or lower the track goes straight to the speakers (not through Web Audio); a boost above 0 dB
+  needs Web Audio, which is what can get blocked.
+- The file is stored on the server's disk (it is not loaded into memory), so long tracks are fine. On Render's free plan
+  the disk is wiped on a restart; the controller restores it (see above). Use mp3/ogg rather than wav to keep the
+  download small.
 
 ## Run locally
 ```

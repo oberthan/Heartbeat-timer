@@ -99,8 +99,13 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 
 function counts() {
   let displays = 0, armed = 0;
-  for (const c of wss.clients) if (c.role === 'display') { displays++; if (c.armed) armed++; }
-  return { displays, armed };
+  const displayList = []; // what each display last reported (is it armed, is its sound ready...)
+  for (const c of wss.clients) if (c.role === 'display') {
+    displays++; if (c.armed) armed++;
+    const st = c.status || {};
+    displayList.push({ armed: !!c.armed, sound: st.sound || 'unknown', pct: st.pct || 0, ctx: st.ctx || '' });
+  }
+  return { displays, armed, displayList };
 }
 function stateMsg() { return JSON.stringify({ type: 'state', settings, run, sample: sampleInfo(), hint, fresh, ...counts(), serverNow: Date.now() }); }
 function broadcast() { const m = stateMsg(); for (const c of wss.clients) if (c.readyState === 1) c.send(m); }
@@ -119,6 +124,13 @@ wss.on('connection', ws => {
         ws.role = msg.role === 'display' ? 'display' : 'controller';
         broadcast();
         break;
+      case 'status': { // a display reports whether its sound is ready / blocked
+        const st = { sound: String(msg.sound || '').slice(0, 12), pct: Math.min(Math.max(Number(msg.pct) || 0, 0), 100), ctx: String(msg.ctx || '').slice(0, 12) };
+        const same = ws.status && JSON.stringify(ws.status) === JSON.stringify(st) && ws.armed === !!msg.armed;
+        ws.status = st; ws.armed = !!msg.armed;
+        if (!same) broadcast();
+        break;
+      }
       case 'armed':
         ws.armed = !!msg.armed; broadcast();
         break;
@@ -138,9 +150,13 @@ wss.on('connection', ws => {
       }
       case 'hint': {
         const text = String(msg.text || '').trim().slice(0, 300);
-        // 'sound' = play a chime on the displays when this hint appears, at soundDb dB
+        // how obvious: style 0 normal, 1 highlighted (flash, pulsing border, label), 2 full screen for holdSec seconds;
+        // chimes = how many times the bell rings (0 = silent) at soundDb dB
+        const style = [0, 1, 2].includes(Number(msg.style)) ? Number(msg.style) : 0;
+        const holdSec = Math.min(Math.max(Number(msg.holdSec) || 10, 3), 60);
+        const chimes = Math.min(Math.max(Math.round(Number(msg.chimes !== undefined ? msg.chimes : (msg.sound ? 1 : 0))) || 0, 0), 5);
         const soundDb = Math.min(Math.max(Number(msg.soundDb) || -8, -40), 0);
-        hint = text ? { text, id: Date.now(), sound: !!msg.sound, soundDb } : null;
+        hint = text ? { text, id: Date.now(), sound: chimes > 0, chimes, soundDb, style, holdSec } : null;
         broadcast();
         break;
       }

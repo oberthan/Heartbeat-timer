@@ -8,8 +8,9 @@
   html, body { margin:0; height:100%; background:#000; overflow:hidden; cursor:none; }
   canvas { position:fixed; inset:0; width:100%; height:100%; display:block; background:#000; }
   #arm { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
-         background:#000; color:#777; font:20px system-ui,sans-serif; cursor:pointer; text-align:center; gap:10px; }
+         background:#000; color:#777; font:20px system-ui,sans-serif; cursor:pointer; text-align:center; gap:10px; padding:0 24px; }
   #arm b { color:#aaa; font-size:28px; }
+  #armStatus { color:#999; min-height:1.4em; }
   #conn { position:fixed; right:8px; bottom:6px; color:#222; font:11px system-ui; }
 </style>
 </head>
@@ -22,8 +23,8 @@
 let P = defaultSettings();
 let run = { running: false, startServerMs: 0 };
 let ws, armed = false, wsOpen = false;
-// ?preview=1: used for the little window on the controller. Same picture, but no sound, no arming, no fullscreen,
-// and it does not register as a display (so it isn't counted on the controller).
+// ?preview=1: used for the little window on the controller. Same picture, but no sound, no arming, no download,
+// no fullscreen, and it does not register as a display (so it isn't counted on the controller).
 const PREVIEW = new URLSearchParams(location.search).has('preview');
 if (PREVIEW) {
   document.getElementById('arm').style.display = 'none';
@@ -51,6 +52,7 @@ function connect() {
     if (!PREVIEW) {
       ws.send(JSON.stringify({ type: 'hello', role: 'display' }));
       ws.send(JSON.stringify({ type: 'armed', armed }));
+      lastReport = '';
     }
     for (let i = 0; i < 8; i++) setTimeout(sendSync, i * 150);
   };
@@ -68,19 +70,18 @@ function onState(m) {
   const oldRev = P.revLen + '/' + P.revDamp;
   P = cleanSettings(m.settings);
   if (ctx && oldRev !== P.revLen + '/' + P.revDamp) buildReverb();
-  sampleInfo = m.sample;
-  if ((m.hint && m.hint.id) !== (hint && hint.id)) hintSince = performance.now();
+  trackInfo = m.sample;
   hint = m.hint;
   // chime for a hint that was just sent (not for one already on screen when this display loaded)
   if (m.hint && m.hint.id !== lastHintId) {
     lastHintId = m.hint.id;
-    if (m.hint.sound && armed && ctx && serverNow() - m.hint.id < 4000) playChime(m.hint.soundDb);
+    if (!PREVIEW && m.hint.chimes > 0 && armed && ctx && serverNow() - m.hint.id < 4000) playChime(m.hint.soundDb, m.hint.chimes);
   }
   const key = m.run.running ? m.run.startServerMs : null;
   run = m.run;
   if (key !== lastRunKey) { lastRunKey = key; key ? beginRun() : endRun(); }
   else if (key && (armed || PREVIEW)) resyncBeats();
-  syncSample();
+  syncTrack();
 }
 
 // ---------- hint chime ----------
@@ -96,10 +97,13 @@ function bell(freq, when, amp) { // soft bell: a fundamental plus inharmonic par
     o.start(when); o.stop(when + dec * 3 + 0.2);
   }
 }
-function playChime(db) {
+function playChime(db, count) {
+  if (ctx.state !== 'running') ctx.resume().catch(() => {});
   const t = ctx.currentTime + 0.03, amp = 0.5 * Math.pow(10, (db == null ? -8 : db) / 20);
-  bell(880, t, amp);            // A5
-  bell(1174.66, t + 0.22, amp); // D6
+  for (let i = 0; i < (count || 1); i++) {
+    bell(880, t + i * 1.9, amp);            // A5
+    bell(1174.66, t + i * 1.9 + 0.22, amp); // D6
+  }
 }
 
 // ---------- sound/picture sync ----------
@@ -110,53 +114,168 @@ const soundAdvance = () => {
   return dev + P.syncMs / 1000;
 };
 
-// ---------- uploaded track ----------
-// The uploaded file is the whole timeline (its start offset is baked in), so it plays from the moment
-// the run starts. It is streamed, not decoded into memory, and kept in sync with the server clock.
-let sampleInfo = null, sampleEl = null, sampleGain = null, sampleVersion = null, startTimer = null;
-function dropSample() {
-  if (sampleEl) { sampleEl.pause(); sampleEl.removeAttribute('src'); sampleEl.load(); }
-  sampleEl = null; sampleGain = null; sampleVersion = null;
+// ---------- uploaded track: download it first, then play it from this device at the right moment ----------
+// The track is the whole timeline (its start offset is baked in). Each display downloads the complete file as soon as
+// it is needed (and keeps it in the browser cache, so a reload doesn't need the server), then starts it locally at the
+// start time and keeps it locked to the shared clock. Nothing is streamed during the game.
+let trackInfo = null; // what the server has: { name, version }
+const track = { version: null, state: 'none', pct: 0, blob: null, url: null, el: null, gainNode: null, routed: false, error: '', fatal: false, retryAt: 0 };
+let startTimer = null, fadeTimer = null, lastPlayTry = 0, playBlocked = false;
+
+function dropTrack() {
+  clearTimeout(startTimer); clearInterval(fadeTimer); fadeTimer = null;
+  if (track.el) { track.el.pause(); track.el.removeAttribute('src'); track.el.load(); }
+  if (track.url) URL.revokeObjectURL(track.url);
+  Object.assign(track, { version: null, state: 'none', pct: 0, blob: null, url: null, el: null, gainNode: null, routed: false, error: '', fatal: false });
 }
-function ensureSampleEl() {
-  if (!ctx) return;
-  if (!sampleInfo) { dropSample(); return; }
-  if (sampleInfo.version === sampleVersion) return;
-  dropSample();
-  sampleVersion = sampleInfo.version;
-  sampleEl = new Audio();
-  sampleEl.preload = 'auto';
-  sampleEl.src = '/sample?v=' + sampleVersion;
-  sampleEl.addEventListener('playing', syncSample);
-  sampleGain = ctx.createGain();
-  ctx.createMediaElementSource(sampleEl).connect(sampleGain);
-  sampleGain.connect(master); // no extra reverb: the track already has it
-}
-const sampleTarget = () => (serverNow() - run.startServerMs) / 1000 + P.startAt * 60 + soundAdvance(); // seconds into the track
-function syncSample() {
-  clearTimeout(startTimer);
-  ensureSampleEl();
-  if (!sampleEl) return;
-  if (!(run.running && armed && P.useSample >= 0.5)) {
-    if (!sampleEl.paused) { // short fade so stopping doesn't click
-      const el = sampleEl;
-      sampleGain.gain.setTargetAtTime(0, ctx.currentTime, 0.04);
-      setTimeout(() => el.pause(), 200);
+async function downloadTrack(version) {
+  const url = '/sample?v=' + version;
+  track.state = 'loading'; track.pct = 0;
+  try {
+    let blob = null;
+    const cache = 'caches' in self ? await caches.open('hb-track') : null;
+    if (cache) { const hit = await cache.match(url); if (hit) blob = await hit.blob(); }
+    if (!blob) {
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const total = Number(res.headers.get('content-length')) || 0;
+      let got = 0;
+      const note = n => { got += n; if (total) track.pct = Math.min(got / total, 1); };
+      if (cache) { // one copy goes into the cache (on disk), the other is read to show progress
+        const stored = cache.put(url, res.clone());
+        const reader = res.body.getReader();
+        for (;;) { const { done, value } = await reader.read(); if (done) break; note(value.length); }
+        await stored;
+        blob = await (await cache.match(url)).blob();
+        for (const k of await cache.keys()) if (new URL(k.url).search !== '?v=' + version) await cache.delete(k); // drop old tracks
+      } else {
+        const chunks = [], reader = res.body.getReader();
+        for (;;) { const { done, value } = await reader.read(); if (done) break; chunks.push(value); note(value.length); }
+        blob = new Blob(chunks, { type: res.headers.get('content-type') || 'audio/mpeg' });
+      }
     }
+    if (track.version !== version) return; // a newer track arrived meanwhile
+    track.blob = blob; track.url = URL.createObjectURL(blob); track.pct = 1; track.state = 'ready';
+  } catch (e) {
+    if (track.version !== version) return;
+    track.state = 'error'; track.error = String((e && e.message) || e); track.retryAt = performance.now() + 4000;
+  }
+}
+function ensureTrack() {
+  if (PREVIEW) return;
+  // if the server forgets the file (a sleeping free instance), keep the copy this display already has; it is only
+  // dropped when the track is switched off or replaced by a newer upload
+  if (!trackInfo) { if (P.useSample < 0.5 && track.version !== null) dropTrack(); return; }
+  if (track.version !== trackInfo.version) { dropTrack(); track.version = trackInfo.version; track.state = 'idle'; }
+  if (P.useSample < 0.5) return; // not needed (yet): don't spend the bandwidth
+  if (track.state === 'error' && !track.fatal && performance.now() > track.retryAt) track.state = 'idle';
+  if (track.state === 'idle') downloadTrack(track.version);
+  if (track.state === 'ready') ensureTrackEl();
+}
+// the sound goes straight to the speakers when the level is 0 dB or lower (independent of the Web Audio context);
+// a boost above 0 dB has to go through Web Audio
+function ensureTrackEl() {
+  const routed = P.sampleGain > 0.05;
+  if (track.el && track.routed === routed) return;
+  if (routed && !ctx) return; // needs the audio context, which exists once the display is armed
+  if (track.el) { track.el.pause(); track.el.removeAttribute('src'); track.el.load(); }
+  const el = new Audio();
+  el.preload = 'auto';
+  el.src = track.url;
+  el.addEventListener('playing', syncTrack);
+  el.addEventListener('error', () => { track.state = 'error'; track.fatal = true; track.error = "This browser can't play the file"; });
+  track.gainNode = null;
+  if (routed) {
+    track.gainNode = ctx.createGain();
+    ctx.createMediaElementSource(el).connect(track.gainNode);
+    track.gainNode.connect(master); // no extra reverb: the track already has it
+  }
+  track.el = el; track.routed = routed;
+}
+function applyLevel(fade) {
+  if (!track.el) return;
+  const lin = Math.pow(10, P.sampleGain / 20) * fade;
+  if (track.routed) { track.gainNode.gain.cancelScheduledValues(0); track.gainNode.gain.value = lin; }
+  else track.el.volume = clamp(lin, 0, 1);
+}
+function cancelFade() { if (fadeTimer) { clearInterval(fadeTimer); fadeTimer = null; } }
+function fadeOutAndPause() { // short fade so stopping doesn't click; cancelled if the countdown starts again
+  if (fadeTimer || !track.el || track.el.paused) return;
+  let f = 1; const el = track.el;
+  fadeTimer = setInterval(() => {
+    f -= 0.15;
+    if (f <= 0) { cancelFade(); el.pause(); applyLevel(1); } else applyLevel(f);
+  }, 20);
+}
+const trackTarget = () => (serverNow() - run.startServerMs) / 1000 + P.startAt * 60 + soundAdvance(); // seconds into the track
+
+function syncTrack() {
+  if (PREVIEW) return;
+  ensureTrack();
+  const el = track.el;
+  const want = run.running && armed && P.useSample >= 0.5 && track.state === 'ready' && el;
+  if (!want) { clearTimeout(startTimer); if (el && !el.paused) fadeOutAndPause(); return; }
+  cancelFade(); applyLevel(1);
+  if (track.routed && ctx.state !== 'running') ctx.resume().catch(() => {});
+  const t = trackTarget();
+  if (t < 0) { // not time yet: wait at the very start, then begin exactly on time
+    if (!el.paused) el.pause();
+    if (el.currentTime > 0.05 && !el.seeking) el.currentTime = 0;
+    clearTimeout(startTimer);
+    if (-t < 0.3) startTimer = setTimeout(syncTrack, Math.max(0, -t * 1000));
     return;
   }
-  sampleGain.gain.value = Math.pow(10, P.sampleGain / 20);
-  const t = sampleTarget();
-  if (t < 0) { startTimer = setTimeout(syncSample, Math.min(-t * 1000, 500)); return; } // waiting for the start
-  if (sampleEl.duration && t >= sampleEl.duration) return; // track is over
-  if (sampleEl.paused) { sampleEl.playbackRate = 1; sampleEl.currentTime = t; sampleEl.play().catch(() => {}); return; }
+  if (el.duration && t >= el.duration) return; // the track is over
+  if (el.paused) {
+    const now = performance.now(); if (now - lastPlayTry < 400) return; lastPlayTry = now;
+    el.playbackRate = 1; el.currentTime = t;
+    el.play().then(() => { playBlocked = false; }, () => { playBlocked = true; });
+    return;
+  }
+  if (el.seeking) return;
   // keep it locked to the clock: seek if far off, otherwise nudge the speed a little (not audible)
-  if (sampleEl.seeking) return;
-  const drift = sampleEl.currentTime - t;
-  if (Math.abs(drift) > 0.25) sampleEl.currentTime = t;
-  else sampleEl.playbackRate = Math.abs(drift) < 0.012 ? 1 : clamp(1 - drift * 1.5, 0.97, 1.03);
+  const drift = el.currentTime - t;
+  if (Math.abs(drift) > 0.25) el.currentTime = t;
+  else el.playbackRate = Math.abs(drift) < 0.012 ? 1 : clamp(1 - drift * 1.5, 0.97, 1.03);
 }
-setInterval(syncSample, 100);
+setInterval(syncTrack, 100);
+
+// ---------- is the sound working? (shown on the display and reported to the controller) ----------
+function soundHealth() {
+  const ctxBad = armed && ctx && ctx.state !== 'running';
+  if (PREVIEW) return { s: 'off' };
+  if (P.useSample < 0.5) return ctxBad ? { s: 'blocked' } : { s: 'off' };
+  if (!trackInfo && track.state !== 'ready') return { s: 'missing' };
+  if (track.state === 'error') return { s: 'error', msg: track.error };
+  if (track.state !== 'ready') return { s: 'loading', pct: Math.round(track.pct * 100) };
+  if (track.routed && ctxBad) return { s: 'blocked' };
+  if (armed && run.running && track.el && track.el.paused) {
+    const t = trackTarget();
+    if (t >= 0 && !(track.el.duration && t >= track.el.duration)) return { s: playBlocked ? 'blocked' : 'starting' };
+  }
+  return { s: 'ready' };
+}
+let lastReport = '', lastReportAt = 0;
+function reportStatus() {
+  if (PREVIEW || !wsOpen) return;
+  const h = soundHealth();
+  const msg = JSON.stringify({ type: 'status', armed, sound: h.s, pct: h.pct || 0, ctx: ctx ? ctx.state : 'none' });
+  if (msg !== lastReport || performance.now() - lastReportAt > 5000) { lastReport = msg; lastReportAt = performance.now(); ws.send(msg); }
+}
+setInterval(reportStatus, 500);
+function unlockAudio() { // any tap/key on the display: let the browser start audio again
+  if (ctx && ctx.state !== 'running') ctx.resume().catch(() => {});
+  syncTrack(); reportStatus();
+}
+['pointerdown', 'keydown', 'touchstart'].forEach(ev => document.addEventListener(ev, unlockAudio, { passive: true }));
+setInterval(() => { if (!PREVIEW && armed && ctx && ctx.state !== 'running') ctx.resume().catch(() => {}); }, 500);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) unlockAudio(); });
+addEventListener('pageshow', unlockAudio);
+setInterval(() => { // status line on the "tap to arm" screen
+  if (PREVIEW) return;
+  const h = soundHealth(), el = document.getElementById('armStatus');
+  el.textContent = P.useSample < 0.5 ? '' : h.s === 'loading' ? 'Downloading the sound… ' + h.pct + '%' : h.s === 'ready' || h.s === 'starting' ? 'Sound downloaded and ready.' : h.s === 'missing' ? 'No sound file on the server yet.' : h.s === 'error' ? 'Sound problem: ' + (h.msg || '') : '';
+}, 300);
 
 // ---------- audio ----------
 let ctx = null, master, convolver, wetGain;
@@ -175,6 +294,7 @@ function buildReverb() {
 function initAudio() {
   if (ctx) return;
   ctx = new AudioContext();
+  ctx.onstatechange = () => { if (ctx.state !== 'running') ctx.resume().catch(() => {}); reportStatus(); };
   master = ctx.createGain(); master.connect(ctx.destination);
   convolver = ctx.createConvolver(); wetGain = ctx.createGain();
   convolver.connect(wetGain); wetGain.connect(ctx.destination);
@@ -230,7 +350,7 @@ function schedule(pos) {
 setInterval(() => { if (run.running && (armed || PREVIEW)) schedule(posNow()); }, 100);
 
 // ---------- drawing ----------
-let hint = null, hintSince = 0;
+let hint = null;
 const cv = document.getElementById('cv'), g2 = cv.getContext('2d');
 function fit() { const d = devicePixelRatio || 1; cv.width = innerWidth * d; cv.height = innerHeight * d; }
 addEventListener('resize', fit); fit();
@@ -247,7 +367,16 @@ function pulseLevel(pos) {
 // Hint layout. 'hint' (set from the server) is what should be on screen; 'shown' is what is drawn right now.
 // With a hint up, the countdown glides up and shrinks, then the hint fades in between it and the bottom.
 // Removing the hint fades it out while the countdown eases back to the middle. A new hint fades the old one out first.
+// Alert styles (chosen by the game master per hint): 0 normal, 1 highlighted (flash, pulsing border, "NEW HINT" label),
+// 2 full screen (the hint takes over the screen for a few seconds, then settles into the normal layout).
 let shown = null, hintAlpha = 0, layoutMix = 0, lastFrame = performance.now();
+const hintAge = () => hint ? Math.max(0, (serverNow() - hint.id) / 1000) : 1e9; // seconds since this hint was sent (server time)
+const smooth = x => x * x * (3 - 2 * x);
+function takeoverLevel() { // 0..1: how much a full-screen hint has taken over the screen
+  if (!hint || hint.style !== 2) return 0;
+  const age = hintAge(), hold = hint.holdSec || 10;
+  return smooth(Math.min(clamp(age / 0.5, 0, 1), 1 - clamp((age - hold) / 1.0, 0, 1)));
+}
 
 function wrapLines(text, size, maxW) {
   g2.font = `600 ${size}px Arial, sans-serif`;
@@ -259,9 +388,9 @@ function wrapLines(text, size, maxW) {
   if (line) lines.push(line);
   return lines;
 }
-function fitHint(text, W, H) { // the biggest text that still fits the area under the countdown
-  const maxW = W * 0.88, maxH = H * 0.40, minSize = Math.round(H * 0.04), step = Math.max(1, Math.round(H * 0.004));
-  let size = Math.round(H * 0.11), lines = wrapLines(text, size, maxW);
+function fitHint(text, W, H, maxH, startFrac, maxW) { // the biggest text that still fits the given area
+  const minSize = Math.round(H * 0.04), step = Math.max(1, Math.round(H * 0.004));
+  let size = Math.round(H * startFrac), lines = wrapLines(text, size, maxW);
   while (lines.length * size * 1.25 > maxH && size > minSize) { size -= step; lines = wrapLines(text, size, maxW); }
   return { size, lines };
 }
@@ -281,21 +410,67 @@ function stepHint(dt) {
 }
 function drawHint(W, H) {
   if (!shown || hintAlpha <= 0) return;
-  const { size, lines } = fitHint(shown.text, W, H);
-  const lh = size * 1.25, blockH = lines.length * lh;
-  const areaTop = H * 0.50, areaBot = H * 0.95, cy = (areaTop + areaBot) / 2;
-  const e = hintAlpha * hintAlpha * (3 - 2 * hintAlpha);
+  const style = shown.style || 0, T = takeoverLevel();
+  const labelRoom = style >= 1 ? H * 0.06 : 0;
+  const areaTop = H * (0.50 - 0.31 * T), areaBot = H * 0.95;
+  const textTop = areaTop + labelRoom;
+  const { size, lines } = fitHint(shown.text, W, H, (areaBot - textTop) * 0.96, 0.11 + 0.06 * T, W * (0.88 + 0.04 * T));
+  const lh = size * 1.25, blockH = lines.length * lh, cy = (textTop + areaBot) / 2;
+  const e = smooth(hintAlpha);
   g2.save();
   g2.globalAlpha = e;
   const lw = W * 0.28 * e; // thin divider that grows in under the countdown
   g2.fillStyle = '#555';
-  g2.fillRect(W / 2 - lw / 2, areaTop - H * 0.015, lw, Math.max(2, H * 0.004));
-  g2.font = `600 ${size}px Arial, sans-serif`;
+  g2.fillRect(W / 2 - lw / 2, areaTop - H * 0.012, lw, Math.max(2, H * 0.004));
   g2.textAlign = 'center'; g2.textBaseline = 'middle';
+  // "NEW HINT" label for a while after a highlighted / full-screen hint arrives
+  const labelFor = style === 2 ? (shown.holdSec || 10) + 1 : 9, age = hintAge();
+  if (style >= 1 && age < labelFor) {
+    const la = clamp(labelFor - age, 0, 1);
+    const ls = Math.round(H * 0.034);
+    g2.font = `700 ${ls}px Arial, sans-serif`;
+    g2.globalAlpha = e * la;
+    g2.fillStyle = '#ffffff'; g2.shadowColor = 'rgba(255,255,255,0.6)'; g2.shadowBlur = ls * 0.5;
+    g2.fillText('N E W   H I N T', W / 2, Math.max(areaTop + labelRoom * 0.5, cy - blockH / 2 - ls * 0.9));
+    g2.globalAlpha = e;
+  }
+  g2.font = `600 ${size}px Arial, sans-serif`;
   g2.shadowColor = 'rgba(255,255,255,0.35)'; g2.shadowBlur = size * 0.35;
   g2.fillStyle = '#f4f4f4';
   const y0 = cy - blockH / 2 + lh / 2 + (1 - e) * H * 0.02; // rises a little as it fades in
   lines.forEach((l, i) => g2.fillText(l, W / 2, y0 + i * lh));
+  g2.restore();
+}
+// flash + pulsing border for highlighted / full-screen hints, relative to when the hint was sent
+function drawAlerts(W, H) {
+  if (!hint || !(hint.style >= 1)) return;
+  const age = hintAge(), hold = hint.style === 2 ? (hint.holdSec || 10) : 4.5;
+  if (age < 0.7) { g2.fillStyle = `rgba(255,255,255,${0.30 * (1 - age / 0.7)})`; g2.fillRect(0, 0, W, H); }
+  if (age < hold + 0.5) {
+    const env = clamp((hold + 0.5 - age) / 0.8, 0, 1);
+    const pulse = 0.5 + 0.5 * Math.sin(age * 2 * Math.PI * 0.9 - Math.PI / 2); // about one pulse per second
+    const lw = Math.max(4, H * (hint.style === 2 ? 0.018 : 0.010));
+    g2.save();
+    g2.strokeStyle = `rgba(255,255,255,${env * (0.25 + 0.75 * pulse)})`;
+    g2.lineWidth = lw; g2.shadowColor = 'rgba(255,255,255,0.8)'; g2.shadowBlur = lw * 4;
+    g2.strokeRect(lw / 2, lw / 2, W - lw, H - lw);
+    g2.restore();
+  }
+}
+// small status message in the corner when the sound isn't (yet) working
+function drawBadge(W, H) {
+  if (PREVIEW || !armed) return;
+  const h = soundHealth();
+  let text = null, col = '#e04545';
+  if (h.s === 'blocked') text = 'SOUND OFF - tap the screen';
+  else if (h.s === 'error') text = 'SOUND FILE PROBLEM' + (h.msg ? ': ' + h.msg : '');
+  else if (h.s === 'missing') text = 'NO SOUND FILE ON THE SERVER';
+  else if (h.s === 'loading') { text = 'Loading sound ' + h.pct + '%'; col = '#8a8a8a'; }
+  if (!text) return;
+  g2.save();
+  g2.font = `600 ${Math.round(H * 0.03)}px Arial, sans-serif`;
+  g2.fillStyle = col; g2.textAlign = 'left'; g2.textBaseline = 'bottom';
+  g2.fillText(text, H * 0.025, H - H * 0.02);
   g2.restore();
 }
 function frame() {
@@ -314,14 +489,17 @@ function frame() {
   const grey = Math.round(P.minGrey + (P.maxGrey - P.minGrey) * clamp(lv * P.pulse, 0, 1));
   g2.fillStyle = `rgb(${grey},${grey},${grey})`;
   g2.textAlign = 'center'; g2.textBaseline = 'middle';
-  const m = layoutMix * layoutMix * (3 - 2 * layoutMix);        // eased 0..1
-  const small = Math.min(0.72, 0.34 / P.tsize);                  // countdown size while a hint is up
-  g2.save(); g2.translate(W / 2, H * (0.5 - 0.23 * m));
-  const sc = (1 - m * (1 - small)) * (1 + 0.035 * lv * P.pulse); g2.scale(sc, sc);
+  const m = smooth(layoutMix), T = takeoverLevel();               // eased 0..1
+  const small = Math.min(0.72, 0.34 / P.tsize), tiny = Math.min(0.32, 0.13 / P.tsize); // countdown size with a hint / during a full-screen hint
+  const baseScale = 1 - m * (1 - small), baseY = 0.5 - 0.23 * m;
+  const sc = (baseScale + (tiny - baseScale) * T) * (1 + 0.035 * lv * P.pulse);
+  g2.save(); g2.translate(W / 2, H * (baseY + (0.095 - baseY) * T)); g2.scale(sc, sc);
   g2.font = `700 ${Math.round(H * P.tsize)}px Arial, sans-serif`;
   g2.fillText(fmtTime(left), 0, 0);
   g2.restore();
   drawHint(W, H);
+  drawAlerts(W, H);
+  drawBadge(W, H);
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
@@ -333,7 +511,7 @@ async function arm() {
   document.getElementById('arm').style.display = 'none';
   if (wsOpen) ws.send(JSON.stringify({ type: 'armed', armed: true }));
   if (run.running) resyncBeats();
-  syncSample();
+  syncTrack(); reportStatus();
   try { await document.documentElement.requestFullscreen(); } catch {}
   try { await navigator.wakeLock.request('screen'); } catch {}
 }
